@@ -24,14 +24,16 @@
 
 | 文件 | 大小 | 格式 | 说明 |
 |------|------|------|------|
-| **china_ip_complete.sql** | 9.4 MB | MySQL Dump | **IPv4 完整数据库**，含 IDC 厂商标记 |
-| **china_ip_db.sqlite** | 16 MB | SQLite | IPv4 主数据库，含区县/经纬度/行政区划码 |
-| **china_ip_db.csv** | 5.8 MB | CSV | IPv4 数据导出 |
-| **china_ipv6_complete.sql** | 1.5 MB | MySQL Dump | **IPv6 完整数据库**，3,103 段含港澳台 |
-| **china_ipv6_db.csv** | 539 KB | CSV | IPv6 数据导出 |
+| **china_merged.sqlite** | 12.8 MB | SQLite | **合并数据库（推荐）** — IPv4 + IPv6 双表合一 |
+| **china_merged.sql** | 20 MB | MySQL Dump | **合并 MySQL** — IPv4 + IPv6 + IDC 参考表三表合一 |
+| **china_ip_complete.sql** | 9.4 MB | MySQL Dump | IPv4 完整数据库，含 IDC 厂商标记 |
+| **china_ip_db.sqlite** | 16 MB | SQLite | IPv4 数据库 |
+| **china_ipv6_complete.sql** | 1.5 MB | MySQL Dump | IPv6 数据库，3,103 段含港澳台 |
+| **china_ipv6_db.sqlite** | 966 KB | SQLite | IPv6 数据库 |
 | **query_china_ip.py** | 15 KB | Python | **双栈查询工具**（自动识别 v4/v6） |
 | **build_china_ip_db.py** | 12 KB | Python | IPv4 数据库构建脚本 |
 | **build_ipv6_db.py** | 16 KB | Python | **IPv6 数据库构建脚本**（APNIC + GeoCN） |
+| **merge_db.py** | 7 KB | Python | **数据库合并脚本** |
 | **GeoCN.mmdb** | 8.7 MB | MaxMind DB | 实时逐 IP 区县查询引擎（v4+v6） |
 | **ok_data_level4.csv** | 3.0 MB | CSV | GB/T 2260 行政区划码 → 名称映射 |
 | **ok_geo.csv** | 160 MB | CSV | 行政区划码 → 经纬度坐标 |
@@ -40,7 +42,60 @@
 
 ## 数据库结构
 
-### MySQL 版 (`china_ip_complete.sql`)
+### 合并版 (`china_merged.sqlite` / `china_merged.sql`) — 推荐
+
+合并数据库包含两个独立表（v4 + v6），`query_china_ip.py` 会自动优先检测。
+
+**SQLite 表结构：**
+
+```sql
+-- IPv4 表：65,412 条记录
+CREATE TABLE china_ipv4 (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  start_ip      TEXT    NOT NULL,
+  end_ip        TEXT    NOT NULL,
+  start_ip_int  INTEGER NOT NULL,
+  end_ip_int    INTEGER NOT NULL,
+  country       TEXT    DEFAULT '中国',
+  province      TEXT    DEFAULT '',
+  city          TEXT    DEFAULT '',
+  district      TEXT    DEFAULT '',
+  isp           TEXT    DEFAULT '',
+  isp_short     TEXT    DEFAULT '',
+  division_code TEXT    DEFAULT '',
+  latitude      REAL,
+  longitude     REAL,
+  geo_level     TEXT    DEFAULT '',
+  idc_vendor    TEXT    DEFAULT ''
+);
+CREATE INDEX idx_v4_start ON china_ipv4(start_ip_int);
+CREATE INDEX idx_v4_end   ON china_ipv4(end_ip_int);
+
+-- IPv6 表：3,103 条记录
+CREATE TABLE china_ipv6 (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  start_ip      TEXT    NOT NULL,
+  end_ip        TEXT    NOT NULL,
+  start_ip_hex  TEXT    NOT NULL DEFAULT '',
+  end_ip_hex    TEXT    NOT NULL DEFAULT '',
+  cidr          TEXT    DEFAULT '',
+  prefix_len    INTEGER DEFAULT 0,
+  country       TEXT    DEFAULT '中国',
+  province      TEXT    DEFAULT '',
+  city          TEXT    DEFAULT '',
+  district      TEXT    DEFAULT '',
+  isp           TEXT    DEFAULT '',
+  division_code TEXT    DEFAULT '',
+  latitude      REAL,
+  longitude     REAL,
+  geo_level     TEXT    DEFAULT 'country',
+  idc_vendor    TEXT    DEFAULT ''
+);
+CREATE INDEX idx_v6_start_hex ON china_ipv6(start_ip_hex);
+CREATE INDEX idx_v6_end_hex   ON china_ipv6(end_ip_hex);
+```
+
+### MySQL 版 (`china_ip_complete.sql` / `china_ipv6_complete.sql`)
 
 ```sql
 -- 主表：64,957 条记录
@@ -148,11 +203,12 @@ CREATE INDEX idx_province     ON china_ip(province);
 ### MySQL 导入
 
 ```bash
-# 创建数据库并导入
+# 推荐：导入合并数据库（IPv4 + IPv6 + IDC 三表合一）
+mysql -u root -p china_ip_db < china_merged.sql
+
+# 或分别导入独立数据库
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS china_ip_db CHARACTER SET utf8mb4"
 mysql -u root -p china_ip_db < china_ip_complete.sql
-
-# 导入 IPv6 数据（可选，独立表）
 mysql -u root -p china_ip_db < china_ipv6_complete.sql
 ```
 

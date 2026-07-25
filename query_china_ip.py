@@ -17,6 +17,7 @@ import sqlite3, sys, os, ipaddress
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_V4 = os.path.join(BASE, 'china_ip_db.sqlite')
 DB_V6 = os.path.join(BASE, 'china_ipv6_db.sqlite')
+DB_MERGED = os.path.join(BASE, 'china_merged.sqlite')
 GEOCN_PATH = os.path.join(BASE, 'GeoCN.mmdb')
 
 # 大厂 IDC 验证列表 (IPv4)
@@ -87,17 +88,27 @@ def query_geocn(ip_str):
     return None, None
 
 
+def _open_db(table):
+    """打开合并库或独立库"""
+    if os.path.exists(DB_MERGED):
+        return sqlite3.connect(DB_MERGED), table
+    if table == 'china_ipv4' and os.path.exists(DB_V4):
+        return sqlite3.connect(DB_V4), 'china_ip'
+    if table == 'china_ipv6' and os.path.exists(DB_V6):
+        return sqlite3.connect(DB_V6), 'china_ipv6'
+    return None, None
+
+
 def query_db_v4(ip_int):
     """从 IPv4 数据库查询"""
-    if not os.path.exists(DB_V4):
+    conn, table = _open_db('china_ipv4')
+    if not conn:
         return None
-    conn = sqlite3.connect(DB_V4)
     cur = conn.cursor()
-    # v4 DB has all columns except idc_vendor
-    cur.execute('''
+    cur.execute(f'''
         SELECT start_ip, end_ip, province, city, isp, division_code,
                latitude, longitude, geo_level, '' as idc_vendor
-        FROM china_ip
+        FROM {table}
         WHERE start_ip_int <= ? AND end_ip_int >= ?
         LIMIT 1
     ''', (ip_int, ip_int))
@@ -108,18 +119,27 @@ def query_db_v4(ip_int):
 
 def query_db_v6(ip_str):
     """从 IPv6 数据库查询"""
-    if not os.path.exists(DB_V6):
-        return None
     ip_hex = ipv6_to_hex(ip_str)
-    conn = sqlite3.connect(DB_V6)
+    conn, table = _open_db('china_ipv6')
+    if not conn:
+        return None
     cur = conn.cursor()
-    cur.execute('''
-        SELECT start_ip, end_ip, cidr, province, city, district, isp,
-               division_code, latitude, longitude, geo_level, idc_vendor, prefix_len
-        FROM china_ipv6
-        WHERE start_ip_hex <= ? AND end_ip_hex >= ?
-        LIMIT 1
-    ''', (ip_hex, ip_hex))
+    if table == 'china_ipv6':
+        cur.execute('''
+            SELECT start_ip, end_ip, cidr, province, city, district, isp,
+                   division_code, latitude, longitude, geo_level, idc_vendor, prefix_len
+            FROM china_ipv6
+            WHERE start_ip_hex <= ? AND end_ip_hex >= ?
+            LIMIT 1
+        ''', (ip_hex, ip_hex))
+    else:
+        cur.execute('''
+            SELECT start_ip, end_ip, cidr, province, city, district, isp,
+                   division_code, latitude, longitude, geo_level, idc_vendor, prefix_len
+            FROM china_ipv6
+            WHERE start_ip_hex <= ? AND end_ip_hex >= ?
+            LIMIT 1
+        ''', (ip_hex, ip_hex))
     row = cur.fetchone()
     conn.close()
     return row
@@ -319,29 +339,27 @@ def stats():
     print('=' * 56)
 
     # IPv4 统计
-    if os.path.exists(DB_V4):
-        conn = sqlite3.connect(DB_V4)
+    v4_path = DB_MERGED if os.path.exists(DB_MERGED) else DB_V4
+    if os.path.exists(v4_path):
+        conn = sqlite3.connect(v4_path)
         cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM china_ip')
+        v4_tbl = 'china_ipv4' if v4_path == DB_MERGED else 'china_ip'
+        cur.execute(f'SELECT COUNT(*) FROM {v4_tbl}')
         v4_total = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(DISTINCT province) FROM china_ip')
+        cur.execute(f'SELECT COUNT(DISTINCT province) FROM {v4_tbl}')
         v4_provinces = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(DISTINCT city) FROM china_ip WHERE city != ""')
+        cur.execute(f'SELECT COUNT(DISTINCT city) FROM {v4_tbl} WHERE city != ""')
         v4_cities = cur.fetchone()[0]
-        cur.execute('SELECT MIN(start_ip_int), MAX(end_ip_int) FROM china_ip')
+        cur.execute(f'SELECT MIN(start_ip_int), MAX(end_ip_int) FROM {v4_tbl}')
         v4_min_i, v4_max_i = cur.fetchone()
         v4_min = str(ipaddress.IPv4Address(v4_min_i))
         v4_max = str(ipaddress.IPv4Address(v4_max_i))
 
-        # Check which columns exist
-        cur.execute("PRAGMA table_info(china_ip)")
-        v4_cols = {r[1] for r in cur.fetchall()}
-
-        cur.execute('SELECT COUNT(*) FROM china_ip WHERE district != ""')
+        cur.execute(f'SELECT COUNT(*) FROM {v4_tbl} WHERE district != ""')
         v4_dist = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM china_ip WHERE latitude IS NOT NULL')
+        cur.execute(f'SELECT COUNT(*) FROM {v4_tbl} WHERE latitude IS NOT NULL')
         v4_geo = cur.fetchone()[0]
-        v4_idc = 0  # IDC vendor only exists in MySQL version
+        v4_idc = 0
         conn.close()
 
         print(f'\n  [IPv4]')
@@ -355,20 +373,22 @@ def stats():
         print(f'  数据源:            ip2region + GeoCN')
 
     # IPv6 统计
-    if os.path.exists(DB_V6):
-        conn = sqlite3.connect(DB_V6)
+    v6_path = DB_MERGED if os.path.exists(DB_MERGED) else DB_V6
+    if os.path.exists(v6_path):
+        conn = sqlite3.connect(v6_path)
         cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM china_ipv6')
+        v6_tbl = 'china_ipv6'
+        cur.execute(f'SELECT COUNT(*) FROM {v6_tbl}')
         v6_total = cur.fetchone()[0]
-        cur.execute('SELECT geo_level, COUNT(*) FROM china_ipv6 GROUP BY geo_level ORDER BY COUNT(*) DESC')
+        cur.execute(f'SELECT geo_level, COUNT(*) FROM {v6_tbl} GROUP BY geo_level ORDER BY COUNT(*) DESC')
         v6_levels = cur.fetchall()
-        cur.execute('SELECT COUNT(DISTINCT isp) FROM china_ipv6 WHERE isp != ""')
+        cur.execute(f'SELECT COUNT(DISTINCT isp) FROM {v6_tbl} WHERE isp != ""')
         v6_isps = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM china_ipv6 WHERE idc_vendor != ""')
+        cur.execute(f'SELECT COUNT(*) FROM {v6_tbl} WHERE idc_vendor != ""')
         v6_idc = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM china_ipv6 WHERE latitude IS NOT NULL')
+        cur.execute(f'SELECT COUNT(*) FROM {v6_tbl} WHERE latitude IS NOT NULL')
         v6_geo = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(DISTINCT province) FROM china_ipv6 WHERE province != ""')
+        cur.execute(f'SELECT COUNT(DISTINCT province) FROM {v6_tbl} WHERE province != ""')
         v6_provs = cur.fetchone()[0]
         conn.close()
 
@@ -390,14 +410,16 @@ def stats():
 
 def query_province(province_name):
     """查询某省 IPv4 段"""
-    if not os.path.exists(DB_V4):
+    v4_path = DB_MERGED if os.path.exists(DB_MERGED) else DB_V4
+    if not os.path.exists(v4_path):
         print('IPv4 数据库不存在')
         return
-    conn = sqlite3.connect(DB_V4)
+    v4_tbl = 'china_ipv4' if v4_path == DB_MERGED else 'china_ip'
+    conn = sqlite3.connect(v4_path)
     cur = conn.cursor()
-    cur.execute('''
+    cur.execute(f'''
         SELECT start_ip, end_ip, city, isp, division_code, latitude, longitude
-        FROM china_ip WHERE province = ? ORDER BY start_ip_int
+        FROM {v4_tbl} WHERE province = ? ORDER BY start_ip_int
     ''', (province_name,))
     rows = cur.fetchall()
     if rows:
