@@ -6,6 +6,7 @@
 china_ip_db.sqlite
 china_ip_db.csv
 china_ip_cidrs.txt
+china_ipv6_db.sqlite
 
 # External data sources (download separately)
 GeoCN.mmdb
