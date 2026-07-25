@@ -1,0 +1,28 @@
+# Per-developer config
+.claude/
+.reasonix/
+
+# Generated database files
+china_ip_db.sqlite
+china_ip_db.csv
+china_ip_complete.sql
+china_ip_cidrs.txt
+
+# External data sources (download separately)
+GeoCN.mmdb
+ok_data_level4.csv
+ok_geo.csv
+
+# Source data
+ipv4_source.txt
+
+# Python cache
+__pycache__/
+*.pyc
+ip2region_py/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
