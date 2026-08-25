@@ -2,7 +2,20 @@
 .claude/
 .reasonix/
 
-# Source data (downloaded separately)
+# Generated database files
+china_ip_db.sqlite
+china_ip_db.csv
+china_ip_cidrs.txt
+china_ipv6_db.sqlite
+china_ipv6_db.csv
+
+# External data sources (download separately)
+GeoCN.mmdb
+ok_data_level4.csv
+ok_geo.csv
+ipv4_source.txt
+
+# Source data directories
 data/
 
 # Generated output
@@ -12,6 +25,7 @@ output/
 __pycache__/
 *.pyc
 *.pyo
+ip2region_py/
 
 # IDE
 .vscode/
