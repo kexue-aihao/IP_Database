@@ -537,6 +537,10 @@ def build_cli():
     p.add_argument('--asn-org', default=None,
                    help='Path to ASN org JSON map (data/bgp/asn_org_map.json) '
                         'used to fill isp field from ASN holder names')
+    p.add_argument('--idc-org-map', default=None,
+                   help='Path to JSON map of ISP -> canonical vendor. '
+                        'When provided, records whose `isp` field matches a key '
+                        'force-update: connection_type=idc, is_residential=False, idc_vendor=vendor')
     return p
 
 
@@ -582,6 +586,26 @@ def main():
                 asn_org_map = None
         print(f'  ASN org map:  {len(asn_org_map) if asn_org_map else 0} entries')
 
+    # Load IDC org map (S12: ISP-based IDC operator classification)
+    idc_org_map = None
+    idc_org_norm = None
+    if args.idc_org_map and os.path.exists(args.idc_org_map):
+        import json as _json
+        with open(args.idc_org_map, 'r', encoding='utf-8') as f:
+            try:
+                idc_org_map = _json.load(f)
+            except Exception:
+                idc_org_map = None
+        if idc_org_map:
+            # Build accent/case-insensitive index
+            import unicodedata as _ud
+            idc_org_norm = {}
+            for k, v in idc_org_map.items():
+                nk = _ud.normalize('NFKD', k).encode('ascii', 'ignore').decode().lower().strip()
+                if nk:
+                    idc_org_norm[nk] = v
+            print(f'  IDC org map:  {len(idc_org_map)} ISPs → {len(idc_org_norm)} norm keys')
+
     # ASN lookup helper
     def asn_lookup(ip_int, ipv):
         if asn_map_data is None:
@@ -605,6 +629,9 @@ def main():
                 if s <= ip_int <= e:
                     return asn
         return None
+
+    # Normalization cache for S12 ISP matching
+    _norm_cache = {}
 
     # Stats counters
     total = 0
@@ -667,6 +694,31 @@ def main():
                             org = asn_org_map.get(str(asn))
                             if org and not org.startswith('AS'):
                                 data['idc_vendor'] = org
+
+            # S12: ISP-based IDC operator override
+            if idc_org_map is not None:
+                isp_val = data.get('isp')
+                if isp_val:
+                    vendor = None
+                    if isp_val in idc_org_map:
+                        vendor = idc_org_map[isp_val]
+                    elif idc_org_norm is not None:
+                        nk = _norm_cache.get(isp_val)
+                        if nk is None:
+                            import unicodedata as _ud
+                            nk = _ud.normalize('NFKD', isp_val).encode('ascii', 'ignore').decode().lower().strip()
+                            _norm_cache[isp_val] = nk
+                        vendor = idc_org_norm.get(nk)
+                    if vendor:
+                        if data.get('connection_type') != 'idc':
+                            data['connection_type'] = 'idc'
+                            field_added['connection_type'] += 1
+                        if data.get('is_residential') is not False:
+                            data['is_residential'] = False
+                            field_added['is_residential'] += 1
+                        if data.get('idc_vendor') != vendor:
+                            data['idc_vendor'] = vendor
+                            field_added['idc_vendor'] += 1
 
             # Legacy mapping tracking (not via add_missing_fields — already done)
             for leg in ('type', 'vendor'):
