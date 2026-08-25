@@ -27,6 +27,7 @@ import bisect
 import csv
 import ipaddress
 import os
+import pickle
 import sys
 from collections import Counter
 
@@ -503,6 +504,12 @@ def build_cli():
                    help='Force IP version (default: auto-detect from source metadata)')
     p.add_argument('--db-type', default=None,
                    help='MMDB database_type string (default: inherit from source)')
+    p.add_argument('--asn-map', default=None,
+                   help='Path to ASN prefix map pickle (data/bgp/asn_prefix_map.pk) '
+                        'for ISP/IDC enrichment via BGP ASN data')
+    p.add_argument('--asn-org', default=None,
+                   help='Path to ASN org JSON map (data/bgp/asn_org_map.json) '
+                        'used to fill isp field from ASN holder names')
     return p
 
 
@@ -532,15 +539,56 @@ def main():
     out_filename = os.path.basename(args.output)
     db_kind = infer_db_kind(out_filename)
 
+    # Load ASN enrichment data (S11)
+    asn_map_data = None
+    asn_org_map = None
+    if args.asn_map and os.path.exists(args.asn_map):
+        with open(args.asn_map, 'rb') as f:
+            asn_map_data = pickle.load(f)
+        print(f'  ASN map:      {asn_map_data.get("n_v4", 0)} v4 / {asn_map_data.get("n_v6", 0)} v6 prefixes')
+    if args.asn_org and os.path.exists(args.asn_org):
+        import json as _json
+        with open(args.asn_org, 'r', encoding='utf-8') as f:
+            try:
+                asn_org_map = _json.load(f)
+            except Exception:
+                asn_org_map = None
+        print(f'  ASN org map:  {len(asn_org_map) if asn_org_map else 0} entries')
+
+    # ASN lookup helper
+    def asn_lookup(ip_int, ipv):
+        if asn_map_data is None:
+            return None
+        if ipv == 4:
+            lst, starts = asn_map_data.get('v4_list', []), asn_map_data.get('v4_starts', [])
+        else:
+            lst, starts = asn_map_data.get('v6_list', []), asn_map_data.get('v6_starts', [])
+        if not lst:
+            return None
+        i = bisect.bisect_right(starts, ip_int) - 1
+        if i < 0:
+            return None
+        s, e, asn = lst[i]
+        if s <= ip_int <= e:
+            return asn
+        for di in (-1, 1, -2, 2, -3, 3, -4, 4, -5, 5):
+            j = i + di
+            if 0 <= j < len(lst):
+                s, e, asn = lst[j]
+                if s <= ip_int <= e:
+                    return asn
+        return None
+
     # Stats counters
     total = 0
     field_added = Counter()
     legacy_mapped = Counter()
     coords_normalized = 0
     idc_matched = 0
+    asn_matched = 0
 
     def process():
-        nonlocal total, coords_normalized, idc_matched
+        nonlocal total, coords_normalized, idc_matched, asn_matched
         for network, data in read_mmdb(args.input, ipv=ipv):
             total += 1
 
@@ -571,11 +619,29 @@ def main():
             if 'idc_vendor' in changed and ctx.idc_vendor:
                 idc_matched += 1
 
+            # ASN enrichment: fill isp/idc_vendor from BGP ASN data
+            if asn_map_data is not None:
+                asn = asn_lookup(ip_int, ipv)
+                if asn is not None:
+                    asn_matched += 1
+                    # Fill isp if missing
+                    if 'isp' not in data or not data.get('isp'):
+                        if asn_org_map:
+                            org = asn_org_map.get(str(asn))
+                            if org and not org.startswith('AS'):
+                                data['isp'] = org
+                        else:
+                            data['isp'] = f'AS{asn}'
+                    # Fill idc_vendor if not set and connection_type is idc
+                    if data.get('connection_type') == 'idc' and 'idc_vendor' not in data:
+                        if asn_org_map:
+                            org = asn_org_map.get(str(asn))
+                            if org and not org.startswith('AS'):
+                                data['idc_vendor'] = org
+
             # Legacy mapping tracking (not via add_missing_fields — already done)
-            # Check if we had legacy 'type' or 'vendor' we used
             for leg in ('type', 'vendor'):
                 if leg in data and not args.drop_legacy:
-                    # keep as-is; not counted as added
                     pass
 
             yield network, data
