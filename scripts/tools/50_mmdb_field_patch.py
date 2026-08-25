@@ -249,6 +249,33 @@ def make_ctx(ip_int, ipv=4, idc_mode='auto', db_kind=None, filename=''):
     return PatchContext(ip_int, ipv, idc_mode, db_kind, filename)
 
 
+def clean_org_name(name):
+    """Remove RIR contact/role suffixes from org names (S11 addition).
+
+    RDAP 'fn' often includes role text like ' - network administrator'
+    which is not part of the company name. This strips those suffixes.
+    """
+    import re as _re
+    if not name:
+        return name
+    name = _re.sub(r'\s*[-–—]\s*Network Administrator[s]?$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'\s+Network Administrator[s]?$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'\s*[-–—]\s*network administrator[s]?$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'\s+network administrator[s]?$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'^Sr\.?\s+', '', name)
+    name = _re.sub(r'\.?\s*Network Administrator[s]?$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'\s*\.?\s*MNTNER$', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'^MNTNER-', '', name, flags=_re.IGNORECASE)
+    name = _re.sub(r'\s*[-–—]\s*$', '', name)
+    name = _re.sub(r'\.+$', '', name)
+    name = name.strip()
+    if name.lower() in ('network administrator', 'network administrators', 'sr.', 'administrator', 'g.network administrators', 'g', 'mntner', 'domnet'):
+        return ''
+    if len(name) <= 1:
+        return ''
+    return name
+
+
 # ====================================================================
 # 3) Read / Metadata Helpers
 # ====================================================================
@@ -628,6 +655,8 @@ def main():
                     if 'isp' not in data or not data.get('isp'):
                         if asn_org_map:
                             org = asn_org_map.get(str(asn))
+                            if org:
+                                org = clean_org_name(org)
                             if org and not org.startswith('AS'):
                                 data['isp'] = org
                         else:
