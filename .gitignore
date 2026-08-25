@@ -1,0 +1,20 @@
+# Per-developer config
+.claude/
+.reasonix/
+
+# Source data (downloaded separately)
+data/
+
+# Generated output
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
