@@ -1,592 +1,29 @@
-# 中国 IP 完整归属地数据库 (IPv4 + IPv6)
+# 中国 IP 完整归属地数据库 (IPv4 + IPv6) — MaxMind DB 格式
 
-基于 [ip2region (lionsoul2014)](https://github.com/lionsoul2014/ip2region) + [GeoCN (ljxi)](https://github.com/ljxi/GeoCN) + [AreaCity-JsSpider-StatsGov](https://github.com/small-dream/AreaCity-JsSpider-StatsGov) + [APNIC](https://ftp.apnic.net/pub/stats/apnic/delegated-apnic-latest) 构建的全量中国 IPv4 + IPv6 归属地数据库，IPv4 精确到 **区县级**，IPv6 覆盖 **大陆/香港/澳门/台湾** 分配段，含 **经纬度**、**行政区划代码** 及 **大厂 IDC 标记**。
+基于 [ip2region](https://github.com/lionsoul2014/ip2region) + [GeoCN](https://github.com/ljxi/GeoCN) + [APNIC](https://ftp.apnic.net/pub/stats/apnic/delegated-apnic-latest) + 多源融合构建的 **IP 地理定位与网络类型分类数据库**，提供 **MaxMind DB (.mmdb)** 格式输出，支持 IPv4/IPv6 双栈。
 
----
-
-## 目录
-
-- [文件说明](#文件说明)
-- [数据库结构](#数据库结构)
-- [快速使用](#快速使用)
-- [查询工具](#查询工具)
-- [数据精度](#数据精度)
-- [IDC 厂商覆盖](#idc-厂商覆盖)
-- [主要运营商](#主要运营商)
-- [数据来源](#数据来源)
-- [构建流程](#构建流程)
-- [性能优化](#性能优化)
-- [许可证](#许可证)
-
----
-
-## 文件说明
-
-| 文件 | 大小 | 格式 | 说明 |
-|------|------|------|------|
-| **china_merged.sqlite** | 12.8 MB | SQLite | **合并数据库（推荐）** — IPv4 + IPv6 双表合一 |
-| **china_merged.sql** | 20 MB | MySQL Dump | **合并 MySQL** — IPv4 + IPv6 + IDC 参考表三表合一 |
-| **china_ip_complete.sql** | 9.4 MB | MySQL Dump | IPv4 完整数据库，含 IDC 厂商标记 |
-| **china_ip_db.sqlite** | 16 MB | SQLite | IPv4 数据库 |
-| **china_ipv6_complete.sql** | 1.5 MB | MySQL Dump | IPv6 数据库，3,103 段含港澳台 |
-| **china_ipv6_db.sqlite** | 966 KB | SQLite | IPv6 数据库 |
-| **query_china_ip.py** | 15 KB | Python | **双栈查询工具**（自动识别 v4/v6） |
-| **build_china_ip_db.py** | 12 KB | Python | IPv4 数据库构建脚本 |
-| **build_ipv6_db.py** | 16 KB | Python | **IPv6 数据库构建脚本**（APNIC + GeoCN） |
-| **merge_db.py** | 7 KB | Python | **数据库合并脚本** |
-| **GeoCN.mmdb** | 8.7 MB | MaxMind DB | 实时逐 IP 区县查询引擎（v4+v6） |
-| **ok_data_level4.csv** | 3.0 MB | CSV | GB/T 2260 行政区划码 → 名称映射 |
-| **ok_geo.csv** | 160 MB | CSV | 行政区划码 → 经纬度坐标 |
-
----
-
-## 数据库结构
-
-### 合并版 (`china_merged.sqlite` / `china_merged.sql`) — 推荐
-
-合并数据库包含两个独立表（v4 + v6），`query_china_ip.py` 会自动优先检测。
-
-**SQLite 表结构：**
-
-```sql
--- IPv4 表：65,412 条记录
-CREATE TABLE china_ipv4 (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  start_ip      TEXT    NOT NULL,
-  end_ip        TEXT    NOT NULL,
-  start_ip_int  INTEGER NOT NULL,
-  end_ip_int    INTEGER NOT NULL,
-  country       TEXT    DEFAULT '中国',
-  province      TEXT    DEFAULT '',
-  city          TEXT    DEFAULT '',
-  district      TEXT    DEFAULT '',
-  isp           TEXT    DEFAULT '',
-  isp_short     TEXT    DEFAULT '',
-  division_code TEXT    DEFAULT '',
-  latitude      REAL,
-  longitude     REAL,
-  geo_level     TEXT    DEFAULT '',
-  idc_vendor    TEXT    DEFAULT ''
-);
-CREATE INDEX idx_v4_start ON china_ipv4(start_ip_int);
-CREATE INDEX idx_v4_end   ON china_ipv4(end_ip_int);
-
--- IPv6 表：3,103 条记录
-CREATE TABLE china_ipv6 (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  start_ip      TEXT    NOT NULL,
-  end_ip        TEXT    NOT NULL,
-  start_ip_hex  TEXT    NOT NULL DEFAULT '',
-  end_ip_hex    TEXT    NOT NULL DEFAULT '',
-  cidr          TEXT    DEFAULT '',
-  prefix_len    INTEGER DEFAULT 0,
-  country       TEXT    DEFAULT '中国',
-  province      TEXT    DEFAULT '',
-  city          TEXT    DEFAULT '',
-  district      TEXT    DEFAULT '',
-  isp           TEXT    DEFAULT '',
-  division_code TEXT    DEFAULT '',
-  latitude      REAL,
-  longitude     REAL,
-  geo_level     TEXT    DEFAULT 'country',
-  idc_vendor    TEXT    DEFAULT ''
-);
-CREATE INDEX idx_v6_start_hex ON china_ipv6(start_ip_hex);
-CREATE INDEX idx_v6_end_hex   ON china_ipv6(end_ip_hex);
-```
-
-### MySQL 版 (`china_ip_complete.sql` / `china_ipv6_complete.sql`)
-
-```sql
--- 主表：64,957 条记录
-CREATE TABLE `china_ip_locations` (
-  `id`            int(11)      NOT NULL AUTO_INCREMENT,
-  `start_ip`      varchar(15)  NOT NULL COMMENT '起始IP',
-  `end_ip`        varchar(15)  NOT NULL COMMENT '结束IP',
-  `start_ip_int`  bigint(20)   NOT NULL COMMENT '起始IP整型',
-  `end_ip_int`    bigint(20)   NOT NULL COMMENT '结束IP整型',
-  `country`       varchar(20)  NOT NULL DEFAULT '中国',
-  `province`      varchar(30)  NOT NULL DEFAULT '' COMMENT '省份',
-  `city`          varchar(30)  NOT NULL DEFAULT '' COMMENT '城市',
-  `district`      varchar(30)  NOT NULL DEFAULT '' COMMENT '区县',
-  `isp`           varchar(50)  NOT NULL DEFAULT '' COMMENT '运营商',
-  `division_code` varchar(6)   NOT NULL DEFAULT '' COMMENT '行政区划代码(GB/T 2260)',
-  `latitude`      decimal(10,6) DEFAULT NULL COMMENT '纬度',
-  `longitude`     decimal(10,6) DEFAULT NULL COMMENT '经度',
-  `geo_level`     varchar(10)  NOT NULL DEFAULT '' COMMENT '精度: province/city/district',
-  `idc_vendor`    varchar(30)  NOT NULL DEFAULT '' COMMENT 'IDC/云厂商标记',
-  PRIMARY KEY (`id`),
-  KEY `idx_start_ip_int` (`start_ip_int`),
-  KEY `idx_end_ip_int`   (`end_ip_int`),
-  KEY `idx_province`     (`province`),
-  KEY `idx_city`         (`city`),
-  KEY `idx_idc_vendor`   (`idc_vendor`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-```sql
--- IDC 参考表：105+ 条范围
-CREATE TABLE `china_idc_ranges` (
-  `id`           int(11)     NOT NULL AUTO_INCREMENT,
-  `vendor`       varchar(30) NOT NULL COMMENT '厂商',
-  `start_ip`     varchar(15) NOT NULL,
-  `end_ip`       varchar(15) NOT NULL,
-  `start_ip_int` bigint(20)  NOT NULL,
-  `end_ip_int`   bigint(20)  NOT NULL,
-  `major_region` varchar(30) DEFAULT '' COMMENT '主要区域',
-  PRIMARY KEY (`id`),
-  KEY `idx_idc_vendor` (`vendor`),
-  KEY `idx_idc_start`  (`start_ip_int`),
-  KEY `idx_idc_end`    (`end_ip_int`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-### IPv6 版 (`china_ipv6_complete.sql`)
-
-```sql
--- IPv6 主表：3,103 条记录（含大陆、香港、澳门、台湾）
-CREATE TABLE `china_ipv6_locations` (
-  `id`            int(11)      NOT NULL AUTO_INCREMENT,
-  `start_ip`      varchar(39)  NOT NULL COMMENT '起始IPv6',
-  `end_ip`        varchar(39)  NOT NULL COMMENT '结束IPv6',
-  `cidr`          varchar(43)  DEFAULT '' COMMENT 'CIDR表示',
-  `prefix_len`    int(11)      DEFAULT 0 COMMENT '前缀长度',
-  `country`       varchar(20)  NOT NULL DEFAULT '中国',
-  `province`      varchar(30)  NOT NULL DEFAULT '' COMMENT '省份',
-  `city`          varchar(30)  NOT NULL DEFAULT '' COMMENT '城市',
-  `district`      varchar(30)  NOT NULL DEFAULT '' COMMENT '区县',
-  `isp`           varchar(50)  NOT NULL DEFAULT '' COMMENT '运营商',
-  `division_code` varchar(6)   NOT NULL DEFAULT '' COMMENT '行政区划代码',
-  `latitude`      decimal(10,6) DEFAULT NULL COMMENT '纬度',
-  `longitude`     decimal(10,6) DEFAULT NULL COMMENT '经度',
-  `geo_level`     varchar(10)  NOT NULL DEFAULT '' COMMENT '精度: country/province/city/district',
-  `idc_vendor`    varchar(30)  NOT NULL DEFAULT '' COMMENT 'IDC/云厂商标记',
-  `start_ip_bin`  binary(16)   DEFAULT NULL COMMENT '起始IP二进制(索引)',
-  `end_ip_bin`    binary(16)   DEFAULT NULL COMMENT '结束IP二进制(索引)',
-  PRIMARY KEY (`id`),
-  KEY `idx_ipv6_start_bin` (`start_ip_bin`),
-  KEY `idx_ipv6_end_bin`   (`end_ip_bin`),
-  KEY `idx_ipv6_province`  (`province`),
-  KEY `idx_ipv6_idc_vendor` (`idc_vendor`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-
-### SQLite IPv4 版 (`china_ip_db.sqlite`)
-
-```sql
-CREATE TABLE china_ip (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  start_ip      TEXT    NOT NULL,
-  end_ip        TEXT    NOT NULL,
-  start_ip_int  INTEGER NOT NULL,
-  end_ip_int    INTEGER NOT NULL,
-  country       TEXT    DEFAULT '中国',
-  province      TEXT    DEFAULT '',
-  city          TEXT    DEFAULT '',
-  district      TEXT    DEFAULT '',
-  isp           TEXT    DEFAULT '',
-  isp_short     TEXT    DEFAULT '',
-  division_code TEXT    DEFAULT '',
-  latitude      REAL,
-  longitude     REAL,
-  geo_level     TEXT    DEFAULT ''
-);
-CREATE INDEX idx_start_ip_int ON china_ip(start_ip_int);
-CREATE INDEX idx_end_ip_int   ON china_ip(end_ip_int);
-CREATE INDEX idx_province     ON china_ip(province);
-```
+**核心特色：**
+- 🏠 **家宽/IDC 智能分类** — 非 IDC 数据中心 IP 自动判定为家宽（住宅），支持 4,794+ 家云/托管运营商标签识别
+- 🌍 **中国 + 全球双库** — 中国区县级精度 + 全球 ASN 级覆盖
+- 📍 **23 个细分库** — 按运营商/类型/精度分库，适配不同场景
+- ⚡ **MaxMind DB 格式** — 高性能二进制树，微秒级查询
+- 🔄 **自动化流水线** — S1~S12 多阶段构建，10×10 子代理并行编排
 
 ---
 
 ## 快速使用
 
-### MySQL 导入
-
-```bash
-# 推荐：导入合并数据库（IPv4 + IPv6 + IDC 三表合一）
-mysql -u root -p china_ip_db < china_merged.sql
-
-# 或分别导入独立数据库
-mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS china_ip_db CHARACTER SET utf8mb4"
-mysql -u root -p china_ip_db < china_ip_complete.sql
-mysql -u root -p china_ip_db < china_ipv6_complete.sql
-```
-
-### 查询示例
-
-#### IPv4 (MySQL)
-```sql
--- 查询指定 IPv4 归属地
-SELECT province, city, district, isp, idc_vendor
-FROM china_ip_locations
-WHERE start_ip_int <= INET_ATON('27.39.157.25')
-  AND end_ip_int   >= INET_ATON('27.39.157.25');
-
--- 统计各省 IDC IP 数量
-SELECT province, idc_vendor, COUNT(*) as cnt
-FROM china_ip_locations
-WHERE idc_vendor != ''
-GROUP BY province, idc_vendor ORDER BY cnt DESC;
-```
-
-#### IPv6 (MySQL)
-```sql
--- 查询指定 IPv6 归属地
-SELECT cidr, province, city, isp, idc_vendor, geo_level
-FROM china_ipv6_locations
-WHERE start_ip_bin <= INET6_ATON('2409:8000::1')
-  AND end_ip_bin   >= INET6_ATON('2409:8000::1');
-
--- 查询所有 IDC 厂商的 IPv6 段
-SELECT cidr, idc_vendor, province
-FROM china_ipv6_locations
-WHERE idc_vendor != '' ORDER BY idc_vendor;
-
--- 统计 IPv6 精度分布
-SELECT geo_level, COUNT(*) as cnt
-FROM china_ipv6_locations GROUP BY geo_level;
-```
-```
-
-### SQLite 查询
-
-```python
-import sqlite3, ipaddress
-
-conn = sqlite3.connect('china_ip_db.sqlite')
-ip_int = int(ipaddress.IPv4Address('27.39.157.25'))
-row = conn.execute('''
-    SELECT province, city, district, isp_short, division_code, latitude, longitude
-    FROM china_ip
-    WHERE start_ip_int <= ? AND end_ip_int >= ?
-    LIMIT 1
-''', (ip_int, ip_int)).fetchone()
-print(row)
-conn.close()
-```
-
----
-
-## 查询工具
-
-项目提供了双栈查询脚本 `query_china_ip.py`，自动识别 IPv4/IPv6：
-
-```bash
-# 自动识别 v4/v6 并查询
-python query_china_ip.py 27.39.157.25
-python query_china_ip.py 2409:8000::1
-
-# 仅用 GeoCN 实时查询（最精确）
-python query_china_ip.py --geocn 27.39.157.25
-
-# 强制 IPv6 数据库查询
-python query_china_ip.py --ipv6 2409:8000::1
-
-# 数据库统计信息 (IPv4 + IPv6)
-python query_china_ip.py --stats
-
-# 查询某省所有 IP 段 (IPv4)
-python query_china_ip.py --province 广东
-
-# 验证大厂 IDC IP 归属 (IPv4 + IPv6)
-python query_china_ip.py --verify
-```
-
-### 架构说明
-
-```
-┌──────────────┐
-│  用户输入 IP  │────> 自动识别 v4/v6
-└──────┬───────┘
-       │
-       ├── IPv4 ──> china_ip_db.sqlite (ip2region)
-       │                │
-       │                ├── GeoCN 区县级精度
-       │                └── IDC 厂商标记
-       │
-       └── IPv6 ──> china_ipv6_db.sqlite (APNIC)
-                        │
-                        ├── GeoCN 省级+精度
-                        ├── 港澳台 覆盖
-                        └── IDC IPv6 标记
-```
-
-1. **自动识别** — 查询工具自动判断 IPv4/IPv6，选择对应数据库
-2. **GeoCN 引擎** — 实时 MaxMind 查询，支持 v4/v6，返回层级行政区划代码
-3. **DB 引擎** — IPv4 做整数范围查询；IPv6 做十六进制字符串范围查询
-4. **联动** — 6 位行政区划码通过 `ok_data_level4.csv` + `ok_geo.csv` 解析为中文名称和经纬度
-
----
-
-## 数据精度
-
-### IPv4 精度
-
-| 精度级别 | 记录数 | 占比 | 含义 |
-|---------|--------|------|------|
-| **区县级** `district` | 22,071 | 34.0% | 精确到区/县/县级市 |
-| **城市级** `city` | 24,818 | 38.2% | 精确到地级市 |
-| **省级** `province` | 18,068 | 27.8% | 仅知所属省份 |
-| **有经纬度** | 64,811 | 99.1% | WGS-84 坐标 |
-
-### IPv6 精度
-
-| 精度级别 | 记录数 | 占比 | 含义 |
-|---------|--------|------|------|
-| **区县级** `district` | 43 | 1.4% | 精确到区县（GeoCN 命中） |
-| **城市级** `city` | 493 | 15.9% | 精确到地级市 |
-| **省级** `province` | 308 | 9.9% | 省级精度 |
-| **国家级** `country` | 2,259 | 72.8% | 中国范围（无更精细数据） |
-
-> IPv6 地理定位精度普遍比 IPv4 低，因为 IPv6 分配段更大（通常 /32 或 /48），覆盖范围更广。
-> GeoCN 对 IPv6 的区县级覆盖率约 1.4%，主要由三大运营商（电信/联通/移动）和其他主要 ISP 的已知部署区域推断。
-
-### 精度说明
-
-- 中国 IPv4 地址分配按 ISP/数据中心 进行，而非按地理网格切割，因此一个 IP 段可能横跨多个区县
-- IPv6 分配段通常为 /32 或 /48，覆盖范围比 IPv4 大得多，精度相应降低
-- 需要 **精确到具体 IP 的区县** 时，应用 GeoCN 实时查询（`query_china_ip.py` 自动使用）
-
----
-
-## IDC 厂商覆盖
-
-### IPv4 IDC 覆盖
-
-MySQL 版本中已对 **8 家主流云厂商/IDC** 的 IPv4 段进行了标记：
-
-| 厂商 | 标记条数 | 主要区域 |
-|------|---------|---------|
-| 中国电信天翼云 | 429 | 全国 |
-| **阿里云** | 287 | 杭州、北京、上海、深圳、香港 |
-| 华为云 | 111 | 北京、广州、上海 |
-| 腾讯云 | 101 | 广州、上海、北京 |
-| AWS 中国 | 43 | 北京、宁夏 |
-| 百度云 | 40 | 北京 |
-| 火山引擎/字节跳动 | 27 | 北京 |
-| 京东云 | 18 | 北京 |
-
-### IPv6 IDC 覆盖
-
-| 厂商 | 覆盖段数 | 主要区域 | 已知前缀 |
-|------|---------|---------|----------|
-| **阿里云** | 1 | 北京 | `2408:4000::/22` |
-| **腾讯云** | 11 | 上海、广州 | `2402:4e00::/23`, `2402:4c00::/23` |
-| 华为云 | 1 | 北京、广州 | `2407:c080::/32` |
-| 中国电信天翼云 | 2 | 全国 | `240e:400::/22` |
-| 百度云 | 1 | 北京 | `2400:da00::/32` |
-| 火山引擎 | 3 | 北京 | `2408:8700::/32` |
-| AWS 中国 | 0 | 北京、宁夏 | 暂未发现公开 IPv6 分配 |
-
-> IPv6 的 IDC 段数据来自公开资料整理，实际覆盖可能更广。
-
-IDC 检测在 MySQL 构建阶段完成，通过 IP 范围匹配标记 `idc_vendor` 字段。查询时可直接按厂商筛选：`WHERE idc_vendor = '阿里云'`。
-
----
-
-## 主要运营商
-
-数据库覆盖 **584 个 ISP/运营商**，前 10 大运营商：
-
-| 运营商 | 覆盖 IP 段数 | 简写 |
-|-------|-------------|------|
-| 中国电信 | 13,240 | 电信 |
-| 中国移动 | 12,980 | 移动 |
-| 中国联通 | 12,073 | 联通 |
-| 中国教育网 | 2,950 | 教育网 |
-| 中国铁通 | 1,685 | 铁通 |
-| 中国科技网 | 363 | 科技网 |
-
-涵盖 48 个省份/地区，包括 **中国大陆 31 省 + 港澳台 + 部分海外归属中国运营商的 IP**。
-
----
-
-## 数据来源
-
-### ip2region (IPv4 主要数据源)
-- **仓库**: [lionsoul2014/ip2region](https://github.com/lionsoul2014/ip2region)
-- **数据**: 整理收录了中国大陆、港、澳、台几乎所有运营商/IDC 的 IPv4 地址段
-- **格式**: `start_ip|end_ip|国家|省份|城市|运营商|0|国家代码`
-- **覆盖**: 约 65,000 条中国 IPv4 段
-
-### APNIC Delegation Stats (IPv6 主要数据源)
-- **来源**: [APNIC FTP](https://ftp.apnic.net/pub/stats/apnic/delegated-apnic-latest)
-- **数据**: 亚太互联网信息中心官方授权数据，记录所有分配到中国（CN/HK/TW/MO）的 IPv6 段
-- **覆盖**: 3,103 条中国 IPv6 分配段（/21 ~ /64）
-- **更新**: 每日更新
-
-### GeoCN (区县精度补充)
-- **仓库**: [ljxi/GeoCN](https://github.com/ljxi/GeoCN)
-- **格式**: MaxMind DB (.mmdb)，可逐 IP 实时查询
-- **精度**: IPv4 约 86% 区县级；IPv6 约 27% 省级/区县级
-- **使用**: 作为双引擎的实时查询层
-
-### AreaCity-JsSpider-StatsGov (行政区划映射)
-- **仓库**: [small-dream/AreaCity-JsSpider-StatsGov](https://github.com/small-dream/AreaCity-JsSpider-StatsGov)
-- **文件**: `ok_data_level4.csv` + `ok_geo.csv`
-- **内容**: GB/T 2260 6 位行政区划代码 ↔ 省/市/区名称 ↔ 经纬度坐标
-- **层级**: XX0000=省, XXYY00=市, XXYYZZ=区县
-
----
-
-## 构建流程
-
-### IPv4 构建 (`build_china_ip_db.py`)
-
-```
-ipv4_source.txt ──> 解析中国 IPv4 段 ──> SQLite (china_ip)
-                                          │
-                                          ├── 省/市/运营商
-                                          ├── start_ip_int/end_ip_int 索引
-                                          └── meta 元信息表
-```
-
-### IPv6 构建 (`build_ipv6_db.py`)
-
-```
-APNIC 数据 ──> 解析中国 IPv6 分配段 ──> GeoCN 采样 ──> ISP 推断
-                                              │
-                                              ├── SQLite (china_ipv6_db)
-                                              ├── MySQL (china_ipv6_complete.sql)
-                                              ├── CSV   (china_ipv6_db.csv)
-                                              └── 支持字段：省/市/区/ISP/经纬度/IDC
-```
-
-### MySQL 合成 (`build_mysql.py`，仅 IPv4)
-
-```
-SQLite (china_ip) ───┐
-GeoCN.mmdb      ─────┤
-ok_data_level4  ─────┤──> china_ip_complete.sql
-ok_geo          ─────┤
-                     │
-IDC 已知范围 ─────────┤──> china_idc_ranges
-```
-
-合成过程：
-1. 读取 SQLite 所有记录
-2. 对每条记录，查询 GeoCN 获取区县级行政区划码
-3. 通过 AreaCity 数据将 6 位码转换为中文省/市/区名称和经纬度
-4. 标记已知 IDC/云厂商 IP 段
-5. 输出 MySQL 格式 dump
-
----
-
-## 性能优化
-
-### 查询优化建议
-
-### IPv4 查询
-
-对于高并发查询场景，推荐使用 **MySQL 版本** 并针对 `start_ip_int` 和 `end_ip_int` 建立索引（已包含在 DDL 中）。查询模式为：
-
-```sql
-SELECT * FROM china_ip_locations
-WHERE start_ip_int <= ? AND end_ip_int >= ?;
-```
-
-这个查询可以利用 `(start_ip_int, end_ip_int)` 复合索引执行范围扫描。
-
-### IPv6 查询
-
-IPv6 使用 `BINARY(16)` 字段和 `INET6_ATON()`/`INET6_NTOA()` 函数：
-
-```sql
-SELECT * FROM china_ipv6_locations
-WHERE start_ip_bin <= INET6_ATON('2409:8000::1')
-  AND end_ip_bin   >= INET6_ATON('2409:8000::1');
-```
-
-SQLite 中使用十六进制字符串比较：
-
-```python
-def ipv6_to_hex(ip_str):
-    ip = ipaddress.IPv6Address(ip_str)
-    return ip.exploded.replace(':', '').lower()
-
-# 查询
-ip_hex = ipv6_to_hex('2409:8000::1')
-cur.execute('''
-    SELECT * FROM china_ipv6
-    WHERE start_ip_hex <= ? AND end_ip_hex >= ?
-''', (ip_hex, ip_hex))
-```
-
----
-
-## 许可证
-
-本项目数据基于以下开源项目整合：
-
-- **ip2region** — [Apache-2.0 License](https://github.com/lionsoul2014/ip2region/blob/master/LICENSE)
-- **GeoCN** — [MIT License](https://github.com/ljxi/GeoCN/blob/main/LICENSE)
-- **AreaCity-JsSpider-StatsGov** — [MIT License](https://github.com/small-dream/AreaCity-JsSpider-StatsGov)
-
-整合后的数据库和工具脚本可按需使用。
-
----
-
-## 统一字段 Schema
-
-所有 MMDB 数据库遵循统一字段规范，包含以下核心字段：
-
-### 通用字段
-
-| 字段名 | 类型 | 必选 | 说明 |
-|---|---|---|---|
-| `connection_type` | string | **是** | 连接类型: `residential`(家宽/住宅) / `idc`(数据中心) / `unknown`(未知) |
-| `is_residential` | boolean | **是** | 家宽判断: `true`=家宽/非IDC / `false`=IDC |
-| `isp` | string | 否 | 运营商名称 (如"中国电信"/"Vodafone") |
-| `idc_vendor` | string | 否 | IDC/云厂商标记 (如"阿里云"/"AWS"/"Azure") |
-| `country` | string | 是 | 国家: 中国库中文, 全球库 ISO 3166-1 alpha-2 |
-| `region` | string | 否 | 区域/州 (全球库) |
-| `province` | string | 否 | 省份 (中国库) |
-| `city` | string | 否 | 城市名称 |
-| `district` | string | 否 | 区县 (仅 district 级记录) |
-| `division_code` | string | 否 | GB/T 2260 6 位行政区划代码 |
-| `geo_level` | string | 是 | 地理精度: district/city/province/admin_center/datacenter/unknown |
-| `latitude` | number | 否 | WGS-84 纬度 (float) |
-| `longitude` | number | 否 | WGS-84 经度 (float) |
-| `confidence` | number | 否 | 置信度 0.0~1.0 |
-| `accuracy_radius` | integer | 否 | 精度半径 (km) |
-
-### 家宽/IDC 判定逻辑
-
-```
-IP 命中 IDC 范围(阿里云/AWS/Azure/GCP/Cloudflare 等) 
-  ⇒ is_residential=false, connection_type='idc', idc_vendor=厂商名
-未命中 IDC 范围(非IDC数据中心IP) 
-  ⇒ is_residential=true,  connection_type='residential'  (家宽)
-私有/保留地址(RFC 1918/CGNAT/回环等) 
-  ⇒ connection_type='unknown'
-```
-
-## 构建
-
-```bash
-# 1. 下载源数据
-#    将以下文件放入 data/ 目录:
-#    - ip.merge.txt  (ip2region 源数据)
-#    - GeoCN.mmdb    (GeoCN MaxMind 数据库)
-#    - ok_data_level4.csv  (行政区划层级)
-#    - ok_geo.csv          (行政区划坐标)
-
-# 2. 运行构建脚本
-python scripts/build_ipv4.py
-python scripts/build_ipv6.py
-```
-
-## 查询示例
-
 ### Python (maxminddb)
+
+```bash
+pip install maxminddb
+```
 
 ```python
 import maxminddb
 
-# 打开数据库
+# 查询中国 IP 归属地
 reader = maxminddb.open_database('output/china_ipv4.mmdb')
-
-# 查询 IP 归属地
 result = reader.get('1.0.1.0')
 print(result)
 # {'province': '福建', 'city': '福州', 'isp': '中国电信',
@@ -598,37 +35,275 @@ result = reader.get('8.129.0.0')
 print(result['connection_type'], result['is_residential'])
 # idc False
 
-# 查询 IPv6
-result = reader.get('240e:1::1')
-print(result['connection_type'], result['is_residential'])
-# residential True
-
+# 查询全球 IP
+reader = maxminddb.open_database('output/global_ipv4_residential.mmdb')
+result = reader.get('8.8.8.8')
+print(result['isp'], result['connection_type'])
+# Google LLC idc
 reader.close()
 ```
 
-### 筛选家宽/IDC IP
+### 判断家宽/IDC
 
 ```python
 def is_residential(reader, ip):
-    """判断是否为家宽 IP (非 IDC 数据中心 IP ⇒ 家宽)"""
     result = reader.get(ip)
     return result.get('is_residential', False) if result else None
 
 def is_idc(reader, ip):
-    """判断是否为 IDC 数据中心 IP"""
     result = reader.get(ip)
     return result.get('connection_type') == 'idc' if result else None
 ```
 
-### SQL (仅限中国 ISP 分库)
+---
 
-```sql
--- 查询某个 IPv4 的归属地
-SELECT * FROM china_ipv4_telecom
-WHERE start_ip_int <= INET_ATON('1.0.1.0')
-  AND end_ip_int   >= INET_ATON('1.0.1.0');
+## 数据库文件说明
 
--- 查询云厂商 IP
-SELECT * FROM china_ipv4_idc WHERE vendor = '阿里云';
+### 中国库 (China)
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `china_ipv4.mmdb` | 1.3 MB | IPv4 归属地（含 isp、connection_type） |
+| `china_ipv4_with_isp.mmdb` | 3.0 MB | IPv4 归属地 + ASN 增强 isp 字段 |
+| `china_ipv4_high_prec.mmdb` | 2.6 MB | IPv4 高精度（区县级为主） |
+| `china_ipv4_high_prec_v2.mmdb` | 2.6 MB | IPv4 高精度 v2（含边界修正） |
+| `china_ipv4_idc.mmdb` | 3.6 KB | IPv4 已知 IDC 范围 |
+| `china_ipv4_idc_enriched.mmdb` | 2.0 KB | IPv4 IDC + ASN 增强 |
+| `china_ipv4_telecom.mmdb` | 390 KB | 中国电信 IPv4 段 |
+| `china_ipv4_unicom.mmdb` | 262 KB | 中国联通 IPv4 段 |
+| `china_ipv4_mobile.mmdb` | 332 KB | 中国移动 IPv4 段 |
+| `china_ipv4_other.mmdb` | 519 KB | 其他运营商 IPv4 段 |
+| `china_ipv6.mmdb` | 253 KB | IPv6 归属地 |
+| `china_ipv6_with_isp.mmdb` | 452 KB | IPv6 + ASN 增强 isp |
+| `china_ipv6_enriched.mmdb` | 253 KB | IPv6 增强版 |
+| `china_ipv6_idc.mmdb` | 5.2 KB | IPv6 已知 IDC 范围 |
+| `china_ipv6_idc_enriched.mmdb` | 1.3 KB | IPv6 IDC + ASN 增强 |
+| `china_ipv6_telecom.mmdb` | 33 KB | 中国电信 IPv6 |
+| `china_ipv6_unicom.mmdb` | 28 KB | 中国联通 IPv6 |
+| `china_ipv6_mobile.mmdb` | 26 KB | 中国移动 IPv6 |
+| `china_ipv6_other.mmdb` | 175 KB | 其他运营商 IPv6 |
+
+### 全球库 (Global)
+
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| `global_ipv4_residential.mmdb` | 90 MB | 全球 IPv4 住宅/家宽库（含 isp、connection_type） |
+| `global_ipv4_idc.mmdb` | 211 KB | 全球 IPv4 IDC 已知范围 |
+| `global_ipv6_residential.mmdb` | 57 MB | 全球 IPv6 住宅/家宽库 |
+| `global_ipv6_idc.mmdb` | 166 KB | 全球 IPv6 IDC 已知范围 |
+
+---
+
+## 统一字段 Schema
+
+所有 MMDB 数据库遵循统一字段规范：
+
+| 字段名 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `connection_type` | string | **是** | `residential`(家宽/住宅) / `idc`(数据中心) / `unknown`(未知) |
+| `is_residential` | bool | **是** | `true`=家宽/非IDC / `false`=IDC |
+| `isp` | string | 否 | 运营商名称 (如"中国电信"/"Google LLC"/"ByteVirt LLC") |
+| `idc_vendor` | string | 否 | IDC/云厂商标记 (如"阿里云"/"AWS"/"ByteVirt") |
+| `country` | string | 是 | 国家: 中国库中文, 全球库 ISO 3166-1 alpha-2 |
+| `region` | string | 否 | 区域/州 (全球库) |
+| `province` | string | 否 | 省份 (中国库) |
+| `city` | string | 否 | 城市名称 |
+| `district` | string | 否 | 区县 (仅 district 级记录) |
+| `division_code` | string | 否 | GB/T 2260 6 位行政区划代码 |
+| `geo_level` | string | 是 | 地理精度: district/city/province/admin_center/datacenter/unknown |
+| `latitude` | number | 否 | WGS-84 纬度 |
+| `longitude` | number | 否 | WGS-84 经度 |
+| `confidence` | number | 否 | 置信度 0.0~1.0 |
+| `accuracy_radius` | integer | 否 | 精度半径 (km) |
+
+---
+
+## 家宽/IDC 判定逻辑
+
+判定按以下优先级执行：
+
+1. **IDC 范围匹配** (IP 段命中已知 IDC 范围，如 8.129.0.0/16 阿里云)
+   ⇒ `connection_type=idc`, `is_residential=false`, `idc_vendor=厂商名`
+
+2. **ISP 标签匹配** (isp 字段命中已知 IDC 运营商标签，如 ByteVirt LLC)
+   ⇒ `connection_type=idc`, `is_residential=false`, `idc_vendor=规范运营商名`
+   覆盖 4,794 个 IDC 运营商标签 (Amazon/AWS/Google/Cloudflare/ByteVirt/Linode/DigitalOcean 等)
+
+3. **非 IDC 且非 ISP 匹配** ⇒ `connection_type=residential`, `is_residential=true` (家宽)
+
+4. **私有/保留地址** (RFC 1918/CGNAT/回环等) ⇒ `connection_type=unknown`
+
+**IDC 范围来源**：阿里云/腾讯云/华为云/百度云/AWS/Azure/GCP/Cloudflare 等 122,240+ 条 IP 段
+
+**ISP 标签来源**：BGP 路由表 (RouteViews RIB) + RIR Delegation Stats + RIPE RDAP 回填 ASN 组织名
+
+---
+
+## 数据库分类体系
+
+```
+output/
+├── china_ipv4.mmdb              # 基础归属地 + 运营商 + 连接类型
+├── china_ipv4_with_isp.mmdb     # + ASN 增强 isp 字段
+├── china_ipv4_high_prec*.mmdb   # 高精度区县级
+├── china_ipv4_idc*.mmdb         # 仅 IDC 记录
+├── china_ipv4_{telecom,unicom,mobile,other}.mmdb  # 按运营商分库
+│
+├── china_ipv6.mmdb
+├── china_ipv6_with_isp.mmdb
+├── china_ipv6_{telecom,unicom,mobile,other}.mmdb
+│
+├── global_ipv4_residential.mmdb # 全球 IPv4 住宅/家宽 (~6.2M 记录)
+├── global_ipv4_idc.mmdb         # 全球 IPv4 IDC (~29K 记录)
+├── global_ipv6_residential.mmdb # 全球 IPv6 住宅/家宽 (~8.6M 记录)
+└── global_ipv6_idc.mmdb         # 全球 IPv6 IDC (~11K 记录)
 ```
 
+---
+
+## 查询示例
+
+### Python (maxminddb)
+
+```python
+import maxminddb
+
+reader = maxminddb.open_database('output/global_ipv4_residential.mmdb')
+
+# 云服务商
+print(reader.get('8.8.8.8'))
+# => connection_type=idc, is_residential=False, isp=Google LLC
+
+# 托管商
+print(reader.get('23.95.123.1'))
+# => connection_type=idc, is_residential=False, isp=ByteVirt LLC
+
+# 家宽
+print(reader.get('1.0.1.0'))
+# => connection_type=residential, is_residential=True
+
+reader.close()
+```
+
+### 批量筛选
+
+```python
+import maxminddb
+
+reader = maxminddb.open_database('output/global_ipv4_residential.mmdb')
+for ip in ['8.8.8.8', '1.1.1.1', '23.92.16.1', '1.0.1.0']:
+    rec = reader.get(ip)
+    if rec:
+        print(f"{ip:12} -> {rec['connection_type']:12} {rec['is_residential']} "
+              f"isp={rec.get('isp','')}")
+```
+
+---
+
+## 数据来源
+
+### 地理定位层
+- **ip2region** ([lionsoul2014](https://github.com/lionsoul2014/ip2region)) — IPv4 中国归属地主数据源
+- **GeoCN** ([ljxi](https://github.com/ljxi/GeoCN)) — 实时 MaxMind 区县级查询引擎
+- **APNIC Delegation Stats** — IPv6 分配段
+- **AreaCity-JsSpider-StatsGov** — GB/T 2260 行政区划代码
+- **DB-IP** — 全球 IP 定位
+- **GeoFeed** — ISP 地理定位源
+- **IPIP** — 部分免费定位数据
+
+### 网络类型 & 运营商层
+- **IDC 范围集** — 122,240+ 条已知云厂商/数据中心 IP 段
+- **BGP 路由表** — RouteViews RIB dump -> 约 1.1M v4 + 25K v6 前缀与 ASN 映射
+- **RIR 授权数据** — 五大 RIR delegated stats -> IP->国家代码索引
+- **RIPE RDAP** — 约 74K ASN 组织名称查询
+- **ISP 标签映射** — 4,794 个 IDC 运营商标签，含 200+ 品牌字典 + 10 子代理审核
+
+---
+
+## 构建流水线
+
+项目采用多阶段流水线 (S1~S12)，每阶段可用 10x10 子代理并行编排。
+
+### 阶段概览
+
+| 阶段 | 说明 | 关键产出 |
+|------|------|---------|
+| **S1** | 字段审计 & Schema 统一 | 字段清单、Gap 报告、修复优先级 |
+| **S2** | 中国 IPv4 基础库补丁 | 补全 isp/is_residential/connection_type |
+| **S3** | 中国 IPv4 IDC 库补丁 | IDC 范围基库 |
+| **S4** | 中国 IPv6 基础库补丁 | IPv6 字段补全 |
+| **S5** | 中国 IPv6 IDC 库补丁 | IPv6 IDC 范围 |
+| **S6** | 全球 IPv4 住宅库补丁 | 全球 v4 住宅库 + 多源融合 |
+| **S7** | 全球 IPv4 IDC 库补丁 | 全球 v4 IDC 库 |
+| **S8** | 全球 IPv6 住宅库补丁 | 全球 v6 住宅库 |
+| **S9** | 全球 IPv6 IDC 库补丁 | 全球 v6 IDC 库 |
+| **S10** | QA 质量审计 | 字段全覆盖、分类规则校验 |
+| **S11** | ASN 增强层 | BGP 路由表 + RDAP 回填 isp 字段 |
+| **S12** | **ISP 标签 IDC 归类** | 4,794 个 IDC 运营商标签驱动分类 |
+
+### 构建命令
+
+```bash
+# 基础库构建
+python scripts/build_ipv4.py
+python scripts/build_ipv6.py
+python scripts/build_global_mmdb.py
+
+# 字段补丁 (S12 ISP 标签 IDC 归类)
+python scripts/tools/50_mmdb_field_patch.py \
+    --in output/global_ipv4_residential.mmdb \
+    --out output/patched.mmdb \
+    --idc-org-map data/bgp/idc_isp_map_auto.json
+
+# ASN 增强 (isp 回填)
+python scripts/tools/50_mmdb_field_patch.py \
+    --in output/china_ipv4.mmdb \
+    --out output/china_ipv4_with_isp.mmdb \
+    --asn-map data/bgp/asn_prefix_map.pk \
+    --asn-org data/bgp/asn_org_map.json
+```
+
+---
+
+## 性能指标
+
+### 数据库规模
+
+| 数据库 | 记录数 | 大小 | 说明 |
+|--------|--------|------|------|
+| global_ipv4_residential | 6,228,206 | 90 MB | 全球 IPv4: 371,312 条 IDC + 5,856,894 条家宽 |
+| global_ipv6_residential | 8,605,194 | 57 MB | 全球 IPv6: 9,043 条 IDC + 8,596,151 条家宽 |
+| global_ipv4_idc | 29,047 | 211 KB | 全球 IPv4 已知 IDC 范围 |
+| global_ipv6_idc | 11,433 | 166 KB | 全球 IPv6 已知 IDC 范围 |
+| china_ipv4_with_isp | 277,782 | 3.0 MB | 中国 IPv4: 6,550 条 IDC |
+| china_ipv6_with_isp | 16,352 | 452 KB | 中国 IPv6: 2 条 IDC |
+
+### ISP 覆盖
+
+| 维度 | 数据 |
+|------|------|
+| 全球 v4 唯一 ISP 标签 | 48,238 个 |
+| 全球 v4 isp 覆盖率 | 67% (4,174,378/6,228,206 条记录含 isp) |
+| 全球 v4 ASN 命中率 | 82.9% |
+| 全球 v4 org 命中率 | 67% |
+| IDC 运营商标签映射 | 4,794 个 |
+| 中国库 ISP 数量 | 588 个 (v4) / 1,320 个 (v6) |
+
+### 查询性能
+
+MaxMind DB 格式使用前缀树 (Trie) 结构，单次查询为 O(prefix_len) 时间：
+- **IPv4**: ~50-200 ns/query (SSD)
+- **IPv6**: ~100-500 ns/query (SSD)
+- **内存映射**: 文件可 mmap 后直接读取，零拷贝
+
+---
+
+## 许可证
+
+本项目数据基于以下开源项目整合：
+
+- **ip2region** — [Apache-2.0](https://github.com/lionsoul2014/ip2region/blob/master/LICENSE)
+- **GeoCN** — [MIT](https://github.com/ljxi/GeoCN/blob/main/LICENSE)
+- **AreaCity-JsSpider-StatsGov** — [MIT](https://github.com/small-dream/AreaCity-JsSpider-StatsGov)
+
+整合后的数据库和工具脚本可按需使用。`data/` 和 `output/` 目录为 gitignored 生成数据。
